@@ -1,0 +1,89 @@
+name: Morning Claude Ping
+
+# Pings Claude on a schedule so your Pro/Max subscription's rolling 5-hour
+# usage window starts at a time *you* choose (e.g. 8am) instead of whenever
+# you happen to send your first message of the day.
+#
+# This runs on GitHub's servers, so it fires even when your laptop is closed
+# or off. It uses Claude Code in headless mode authenticated with your
+# subscription token, so the ping counts against your real account window
+# (the API would NOT — it has no 5-hour window).
+
+on:
+  schedule:
+    # Fires every 30 min (UTC). The "gate" step below only proceeds when it's
+    # actually one of your PING_HOUR values in your PING_TZ timezone — so this
+    # is DST-safe and works for half-hour-offset zones like India (UTC+5:30).
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {} # adds a manual "Run workflow" button for testing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: morning-claude-ping
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    env:
+      PING_TZ: ${{ vars.PING_TZ || 'Asia/Kolkata' }}
+      PING_HOUR: ${{ vars.PING_HOUR || '8' }}
+    steps:
+      - name: Is it ping time in your timezone?
+        id: gate
+        run: |
+          set -euo pipefail
+
+          # A manual run always pings (handy for testing your setup).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run — will ping."
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          now_h=$(TZ="$PING_TZ" date +%H)
+          now_m=$((10#$(TZ="$PING_TZ" date +%M)))   # 10# forces base-10 (no octal)
+          printf 'Local time in %s: %s:%02d  (target hour[s]: %s)\n' \
+            "$PING_TZ" "$now_h" "$now_m" "$PING_HOUR"
+
+          # Match if the current local hour is one of PING_HOUR (comma-separated)
+          # AND we're in the first half of the hour. The */30 schedule guarantees
+          # a firing lands in that window for both whole- and half-hour timezones.
+          go=false
+          IFS=',' read -ra targets <<< "$PING_HOUR"
+          for h in "${targets[@]}"; do
+            h=$(echo "$h" | tr -d '[:space:]')
+            if [ "$now_h" = "$(printf '%02d' "$h")" ] && [ "$now_m" -lt 30 ]; then
+              go=true
+            fi
+          done
+
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+          if [ "$go" = "true" ]; then echo "Match — will ping."; else echo "Not ping time — skipping."; fi
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.go == 'true'
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code
+        if: steps.gate.outputs.go == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Ping Claude (starts / aligns your 5-hour window)
+        if: steps.gate.outputs.go == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          PING_PROMPT: ${{ vars.PING_PROMPT || 'Reply with only the single word: ready' }}
+          PING_MODEL: ${{ vars.PING_MODEL || 'haiku' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            echo "::error::Missing CLAUDE_CODE_OAUTH_TOKEN secret. Run 'claude setup-token' locally, then add it under Settings → Secrets and variables → Actions → New repository secret."
+            exit 1
+          fi
+          echo "Pinging Claude (model: $PING_MODEL)…"
+          claude -p "$PING_PROMPT" --model "$PING_MODEL" --max-turns 1
+          echo "✓ Done — your 5-hour window has started."

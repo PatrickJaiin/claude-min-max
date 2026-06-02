@@ -1,0 +1,11 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Secrets / local env — never commit tokens
+.env
+.env.*
+*.token
+
+# OS
+.DS_Store

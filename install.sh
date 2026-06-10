@@ -74,6 +74,18 @@ else
 fi
 
 # ── 3. Claude subscription token → encrypted repo secret ────────────────────
+# A bad bearer token always gets HTTP 401 from the API; any other status means
+# the token is recognized. We verify BEFORE storing — a locally logged-in
+# `claude` would silently use keychain credentials, so it can't be the check.
+token_status() {
+  curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://api.anthropic.com/v1/messages \
+    -H "Authorization: Bearer $1" -H 'anthropic-beta: oauth-2025-04-20' \
+    -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
+    -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
+    2>/dev/null || printf '000'
+}
+valid_token() { [ -n "$1" ] && [ "$(token_status "$1")" != "401" ]; }
+
 if [ -z "${ROTATE:-}" ] && gh secret list --repo "$repo" 2>/dev/null | grep -q 'CLAUDE_CODE_OAUTH_TOKEN'; then
   ok "Claude token already configured (re-run with ROTATE=1 to replace it)"
 else
@@ -94,20 +106,45 @@ else
     script -qec "claude setup-token" "$TOKEN_TMP" <"$TTY" >"$TTY" 2>&1 || true
   fi
   esc=$(printf '\033')
-  token=$(sed "s/${esc}\[[0-9;]*[A-Za-z]//g" "$TOKEN_TMP" | tr -d '\r' \
-          | grep -oE 'sk-ant-oat[0-9]*-[A-Za-z0-9_-]{20,}' | tail -1 || true)
+  clean=$(sed "s/${esc}\[[0-9;]*[A-Za-z]//g" "$TOKEN_TMP" | tr -d '\r')
   rm -f "$TOKEN_TMP"; TOKEN_TMP=""
+
+  # Candidate tokens, most-complete first: everything joined (rescues tokens
+  # hard-wrapped across lines by narrow terminals), per-line matches longest
+  # first, and the clipboard. First one that authenticates wins.
+  pat='sk-ant-oat[0-9]*-[A-Za-z0-9_-]{20,}'
+  token=""
+  candidates=$(
+    printf '%s' "$clean" | tr -d '\n' | grep -oE "$pat" || true
+    printf '%s' "$clean" | tr -d '[:space:]' | grep -oE "$pat" || true
+    printf '%s\n' "$clean" | grep -oE "$pat" | awk '{print length, $0}' | sort -rn | cut -d' ' -f2- || true
+    command -v pbpaste >/dev/null 2>&1 && pbpaste 2>/dev/null | grep -oE "$pat" || true
+  )
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    if valid_token "$cand"; then token="$cand"; break; fi
+  done <<EOF
+$(printf '%s\n' "$candidates" | awk '!seen[$0]++')
+EOF
+
   if [ -n "$token" ]; then
-    ok "Token captured automatically"
+    ok "Token captured and verified"
   else
-    # Couldn't read it cleanly (e.g. wrapped by a narrow terminal) — fall back.
-    printf 'Paste the sk-ant-oat… token (input hidden): ' >"$TTY"
-    read -rs token <"$TTY"; printf '\n' >"$TTY"
+    # Couldn't capture a working token — fall back to manual paste, verified.
+    tries=0
+    while [ -z "$token" ] && [ "$tries" -lt 3 ]; do
+      tries=$((tries + 1))
+      printf 'Paste the sk-ant-oat… token (input hidden): ' >"$TTY"
+      read -rs cand <"$TTY"; printf '\n' >"$TTY"
+      cand=$(printf '%s' "$cand" | tr -d '[:space:]')
+      if valid_token "$cand"; then
+        token="$cand"; ok "Token verified"
+      else
+        err "That token didn't authenticate (401). If your terminal wrapped it, widen the window, re-copy, and try again."
+      fi
+    done
+    [ -n "$token" ] || { err "Couldn't get a working token after 3 attempts."; exit 1; }
   fi
-  case "$token" in
-    sk-ant-oat*) ;;
-    *) err "That doesn't look like a setup-token (should start with sk-ant-oat)."; exit 1 ;;
-  esac
   printf '%s' "$token" | gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo "$repo"
   ok "Token stored as encrypted secret in $repo"
 fi
@@ -125,14 +162,23 @@ gh variable set PING_TZ   --repo "$repo" --body "$tz"
 gh variable set PING_HOUR --repo "$repo" --body "$PING_HOUR"
 ok "Daily ping at ${PING_HOUR}:00 ($tz)"
 
-# ── 5. Fire a test run (retries briefly: template copies are async) ─────────
+# ── 5. Fire a test run and wait for the verdict ─────────────────────────────
+# (retries briefly: template copies are async)
 triggered=false
 for _ in 1 2 3 4 5; do
   if gh workflow run ping.yml --repo "$repo" >/dev/null 2>&1; then triggered=true; break; fi
   sleep 3
 done
 if $triggered; then
-  ok "Test ping triggered — watch it:  gh run watch --repo $repo"
+  bold "Test ping running (~30s)…"
+  sleep 6
+  run_id=$(gh run list --repo "$repo" --workflow=ping.yml --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+  if [ -n "$run_id" ] && gh run watch "$run_id" --repo "$repo" --exit-status >/dev/null 2>&1; then
+    ok "Test ping succeeded — checked end to end."
+  else
+    err "Test ping failed. Inspect it:  gh run view ${run_id:-<id>} --repo $repo --log-failed"
+    exit 1
+  fi
 else
   err "Couldn't trigger the test run. Enable Actions (repo Settings → Actions) and run:"
   printf '    gh workflow run ping.yml --repo %s\n' "$repo"

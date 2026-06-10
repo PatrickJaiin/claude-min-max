@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/in
 You approve **two browser logins** — GitHub, then Claude — and the installer does everything else, with **no prompts and no local files**:
 
 1. creates `your-username/claude-min-max` in your GitHub account,
-2. mints your Claude subscription token (captured automatically) and stores it as an encrypted repo secret,
+2. mints your Claude subscription token, **verifies it authenticates**, and stores it as an encrypted repo secret,
 3. auto-detects your timezone and schedules the daily **8am** ping,
 4. fires a test run so you can see it work.
 

@@ -86,9 +86,19 @@ token_status() {
 }
 valid_token() { [ -n "$1" ] && [ "$(token_status "$1")" != "401" ]; }
 
-if [ -z "${ROTATE:-}" ] && gh secret list --repo "$repo" 2>/dev/null | grep -q 'CLAUDE_CODE_OAUTH_TOKEN'; then
-  ok "Claude token already configured (re-run with ROTATE=1 to replace it)"
+# Keep an existing token only if it has actually proven itself: the secret is
+# write-only (can't be read back and re-validated), so the last run's verdict
+# is the best signal. A token that never passed a run gets replaced.
+have_secret=false
+gh secret list --repo "$repo" 2>/dev/null | grep -q 'CLAUDE_CODE_OAUTH_TOKEN' && have_secret=true
+last_run=$(gh run list --repo "$repo" --workflow=ping.yml --limit 1 --json conclusion -q '.[0].conclusion' 2>/dev/null || true)
+
+if $have_secret && [ -z "${ROTATE:-}" ] && [ "$last_run" = "success" ]; then
+  ok "Claude token already configured and working (re-run with ROTATE=1 to replace it)"
 else
+  if $have_secret && [ -z "${ROTATE:-}" ]; then
+    bold "Existing token has never passed a test run — replacing it."
+  fi
   if ! command -v claude >/dev/null 2>&1; then
     bold "Installing Claude Code…"
     curl -fsSL https://claude.ai/install.sh | bash

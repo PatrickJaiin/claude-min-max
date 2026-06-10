@@ -1,107 +1,143 @@
 #!/usr/bin/env bash
 #
-# claude-min-max installer.
+# claude-min-max installer — one command, two browser approvals, done.
 #
-# Two ways to run it:
-#   A) From anywhere (creates your repo from the template, then configures it):
-#        curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/install.sh | bash
-#   B) From inside a clone of your pinger repo (just configures it):
-#        ./install.sh
+#   curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/install.sh | bash
 #
-# It is safe to pipe into bash: all prompts read from /dev/tty, not stdin.
+# What it does, with no local files left behind:
+#   1. creates <you>/claude-min-max in your GitHub account (from the template)
+#   2. mints your Claude subscription token and stores it as an encrypted secret
+#   3. detects your timezone, schedules the daily ping (8am by default)
+#   4. fires a test run
+#
+# Re-running is safe — it updates your existing setup. Optional overrides:
+#   curl -fsSL …/install.sh | PING_HOUR=8,13 bash      # change ping hour(s)
+#   curl -fsSL …/install.sh | ROTATE=1 bash            # mint a fresh token
+#   PING_TZ=Europe/Berlin, REPO_NAME=my-pinger, TEMPLATE=owner/repo also work.
+#
+# Safe to pipe into bash: anything interactive reads from /dev/tty, not stdin.
 #
 set -euo pipefail
 
-# ─── MAINTAINER: set this to YOUR published template repo before sharing ───
-#     (or callers can override it with:  TEMPLATE=me/claude-min-max bash install.sh )
 TEMPLATE="${TEMPLATE:-PatrickJaiin/claude-min-max}"
-# ───────────────────────────────────────────────────────────────────────────
+REPO_NAME="${REPO_NAME:-claude-min-max}"
+PING_HOUR="${PING_HOUR:-8}"
 
 TTY=/dev/tty
-ask()       { local p="$1" d="${2:-}" v=""; printf '%s' "$p" >"$TTY"; read -r  v <"$TTY" || true; printf '%s' "${v:-$d}"; }
-asksecret() { local p="$1"        v=""; printf '%s' "$p" >"$TTY"; read -rs v <"$TTY" || true; printf '\n' >"$TTY"; printf '%s' "$v"; }
-confirm()   { local v; v=$(ask "$1" "Y"); [[ "$v" =~ ^[Yy] ]]; }
-bold()      { printf '\033[1m%s\033[0m\n' "$*"; }
-ok()        { printf '\033[32m✓\033[0m %s\n' "$*"; }
-err()       { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; }
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+err()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; }
+ask()  { local v=""; printf '%s' "$1" >"$TTY"; read -r v <"$TTY" || true; printf '%s' "${v:-${2:-}}"; }
+
+TOKEN_TMP=""
+trap '[ -n "$TOKEN_TMP" ] && rm -f "$TOKEN_TMP"' EXIT
 
 bold "claude-min-max installer"
 echo
 
-# 1. Required tools ----------------------------------------------------------
-for c in gh git npm; do
-  if ! command -v "$c" >/dev/null 2>&1; then
-    err "'$c' is required but not installed."
-    case "$c" in
-      gh)  printf '  Install the GitHub CLI: https://cli.github.com  (macOS: brew install gh)\n' ;;
-      git) printf '  Install git: https://git-scm.com\n' ;;
-      npm) printf '  Install Node.js (includes npm): https://nodejs.org\n' ;;
-    esac
-    exit 1
-  fi
-done
-ok "Found gh, git, npm"
-
-# 2. GitHub auth -------------------------------------------------------------
-gh auth status >/dev/null 2>&1 || gh auth login <"$TTY"
+# ── 1. The only hard dependency: the GitHub CLI ─────────────────────────────
+if ! command -v gh >/dev/null 2>&1; then
+  err "The GitHub CLI ('gh') is required: https://cli.github.com  (macOS: brew install gh)"
+  exit 1
+fi
+if ! gh auth status >/dev/null 2>&1; then
+  bold "GitHub login (browser will open)…"
+  gh auth login <"$TTY" || { err "GitHub login failed."; exit 1; }
+fi
 ok "GitHub authenticated"
 
-# 3. Pick the target repo: configure this one, or create from template -------
+# ── 2. Your pinger repo: reuse it, or create it from the template ───────────
+# No clone needed — everything below configures the repo remotely.
 if [ -f ".github/workflows/ping.yml" ]; then
-  if ! repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null); then
-    err "This folder has the workflow but isn't pushed to GitHub yet. Publish it first:"
-    printf '    git init && git add -A && git commit -m "init"\n'
-    printf '    gh repo create claude-min-max --public --source=. --push\n'
-    printf '  then re-run ./install.sh\n'
+  # Running inside a pinger repo (e.g. a contributor's clone): configure this one.
+  repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || {
+    err "This folder isn't on GitHub yet. Publish it first:"
+    printf '    gh repo create %s --public --source=. --push\n' "$REPO_NAME"
     exit 1
-  fi
+  }
   ok "Configuring this repo: $repo"
 else
-  bold "Creating your pinger from template: $TEMPLATE"
-  if [ "$TEMPLATE" = "OWNER/claude-min-max" ]; then
-    err "Template not set. Re-run as:  TEMPLATE=<owner>/claude-min-max bash install.sh"
-    exit 1
-  fi
-  name=$(ask "Name for your new repo [my-claude-pinger]: " "my-claude-pinger")
-  gh repo create "$name" --template "$TEMPLATE" --public --clone
-  cd "$name"
-  repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-  ok "Created $repo"
-fi
-
-# 4. Claude Code + subscription token ----------------------------------------
-command -v claude >/dev/null 2>&1 || { bold "Installing Claude Code…"; npm install -g @anthropic-ai/claude-code; }
-
-echo
-bold "Step 1/3 — Generate a Claude subscription token"
-printf '  A browser opens. Log in with your Claude Pro/Max account and approve.\n'
-printf '  It prints a token starting with sk-ant-oat… — copy it.\n'
-ask "Press Enter to run 'claude setup-token'… " >/dev/null
-claude setup-token <"$TTY" || { err "setup-token failed"; exit 1; }
-token=$(asksecret "Paste the token (hidden), then Enter: ")
-[ -n "$token" ] || { err "No token entered."; exit 1; }
-printf '%s' "$token" | gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo "$repo"
-ok "Stored secret CLAUDE_CODE_OAUTH_TOKEN"
-
-# 5. Schedule ----------------------------------------------------------------
-echo
-bold "Step 2/3 — When should we ping you?"
-tz=$(ask "Timezone [Asia/Kolkata]: " "Asia/Kolkata")
-hours=$(ask "Hour(s) of day, 24h, comma-separated [8]: " "8")
-gh variable set PING_TZ   --repo "$repo" --body "$tz"
-gh variable set PING_HOUR --repo "$repo" --body "$hours"
-ok "Will ping daily at ${hours}:00 (${tz})"
-
-# 6. Test --------------------------------------------------------------------
-echo
-bold "Step 3/3 — Test it now?"
-if confirm "Trigger a test ping? [Y/n]: "; then
-  if gh workflow run ping.yml --repo "$repo"; then
-    ok "Triggered. Watch it:  gh run watch --repo $repo   (or the Actions tab)"
+  user=$(gh api user -q .login)
+  repo="$user/$REPO_NAME"
+  if gh repo view "$repo" --json name >/dev/null 2>&1; then
+    # Repo exists — make sure it's actually a pinger before touching it.
+    if gh api "repos/$repo/contents/.github/workflows/ping.yml" >/dev/null 2>&1; then
+      ok "Using your existing $repo"
+    else
+      err "$repo exists but isn't a claude-min-max pinger. Re-run with REPO_NAME=<something-else>."
+      exit 1
+    fi
   else
-    err "Couldn't trigger — enable Actions under Settings → Actions → General, then retry."
+    gh repo create "$REPO_NAME" --template "$TEMPLATE" --public >/dev/null
+    ok "Created $repo (public — free Actions minutes)"
   fi
 fi
 
+# ── 3. Claude subscription token → encrypted repo secret ────────────────────
+if [ -z "${ROTATE:-}" ] && gh secret list --repo "$repo" 2>/dev/null | grep -q 'CLAUDE_CODE_OAUTH_TOKEN'; then
+  ok "Claude token already configured (re-run with ROTATE=1 to replace it)"
+else
+  if ! command -v claude >/dev/null 2>&1; then
+    bold "Installing Claude Code…"
+    curl -fsSL https://claude.ai/install.sh | bash
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+  echo
+  bold "Claude login (browser will open) — approve with your Pro/Max account…"
+  # Run setup-token under a pty so it stays fully interactive, while teeing its
+  # output to a temp file. If the token prints cleanly we grab it ourselves and
+  # the user never has to copy-paste anything.
+  TOKEN_TMP=$(mktemp)
+  if [ "$(uname)" = "Darwin" ]; then
+    script -q "$TOKEN_TMP" claude setup-token <"$TTY" >"$TTY" 2>&1 || true
+  else
+    script -qec "claude setup-token" "$TOKEN_TMP" <"$TTY" >"$TTY" 2>&1 || true
+  fi
+  esc=$(printf '\033')
+  token=$(sed "s/${esc}\[[0-9;]*[A-Za-z]//g" "$TOKEN_TMP" | tr -d '\r' \
+          | grep -oE 'sk-ant-oat[0-9]*-[A-Za-z0-9_-]{20,}' | tail -1 || true)
+  rm -f "$TOKEN_TMP"; TOKEN_TMP=""
+  if [ -n "$token" ]; then
+    ok "Token captured automatically"
+  else
+    # Couldn't read it cleanly (e.g. wrapped by a narrow terminal) — fall back.
+    printf 'Paste the sk-ant-oat… token (input hidden): ' >"$TTY"
+    read -rs token <"$TTY"; printf '\n' >"$TTY"
+  fi
+  case "$token" in
+    sk-ant-oat*) ;;
+    *) err "That doesn't look like a setup-token (should start with sk-ant-oat)."; exit 1 ;;
+  esac
+  printf '%s' "$token" | gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo "$repo"
+  ok "Token stored as encrypted secret in $repo"
+fi
+
+# ── 4. Schedule: your timezone (auto-detected) + ping hour(s) ───────────────
+tz="${PING_TZ:-}"
+if [ -z "$tz" ] && [ -L /etc/localtime ]; then
+  tz=$(readlink /etc/localtime | sed -E 's|.*/zoneinfo/||')
+fi
+if [ -z "$tz" ] && command -v timedatectl >/dev/null 2>&1; then
+  tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+fi
+[ -n "$tz" ] || tz=$(ask "Couldn't detect your timezone — enter it (e.g. Asia/Kolkata) [UTC]: " "UTC")
+gh variable set PING_TZ   --repo "$repo" --body "$tz"
+gh variable set PING_HOUR --repo "$repo" --body "$PING_HOUR"
+ok "Daily ping at ${PING_HOUR}:00 ($tz)"
+
+# ── 5. Fire a test run (retries briefly: template copies are async) ─────────
+triggered=false
+for _ in 1 2 3 4 5; do
+  if gh workflow run ping.yml --repo "$repo" >/dev/null 2>&1; then triggered=true; break; fi
+  sleep 3
+done
+if $triggered; then
+  ok "Test ping triggered — watch it:  gh run watch --repo $repo"
+else
+  err "Couldn't trigger the test run. Enable Actions (repo Settings → Actions) and run:"
+  printf '    gh workflow run ping.yml --repo %s\n' "$repo"
+fi
+
 echo
-ok "All set. Claude will ping on schedule — laptop open or not."
+ok "Done. Claude pings at ${PING_HOUR}:00 ($tz) every day — laptop open or not."
+printf '  Change the schedule anytime:  gh variable set PING_HOUR --repo %s --body "8,13"\n' "$repo"

@@ -28,7 +28,7 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     env:
-      PING_TZ: ${{ vars.PING_TZ || 'Asia/Kolkata' }}
+      PING_TZ: ${{ vars.PING_TZ || 'UTC' }}
       PING_HOUR: ${{ vars.PING_HOUR || '8' }}
     steps:
       - name: Is it ping time in your timezone?
@@ -54,8 +54,9 @@ jobs:
           go=false
           IFS=',' read -ra targets <<< "$PING_HOUR"
           for h in "${targets[@]}"; do
-            h=$(echo "$h" | tr -d '[:space:]')
-            if [ "$now_h" = "$(printf '%02d' "$h")" ] && [ "$now_m" -lt 30 ]; then
+            h=$(echo "$h" | tr -cd '0-9')   # keep digits only ("08", " 8 " both fine)
+            [ -n "$h" ] || continue
+            if [ "$((10#$now_h))" -eq "$((10#$h))" ] && [ "$now_m" -lt 30 ]; then
               go=true
             fi
           done
@@ -63,21 +64,18 @@ jobs:
           echo "go=$go" >> "$GITHUB_OUTPUT"
           if [ "$go" = "true" ]; then echo "Match — will ping."; else echo "Not ping time — skipping."; fi
 
-      - uses: actions/setup-node@v4
-        if: steps.gate.outputs.go == 'true'
-        with:
-          node-version: "20"
-
       - name: Install Claude Code
         if: steps.gate.outputs.go == 'true'
-        run: npm install -g @anthropic-ai/claude-code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Ping Claude (starts / aligns your 5-hour window)
         if: steps.gate.outputs.go == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          PING_PROMPT: ${{ vars.PING_PROMPT || 'Reply with only the single word: ready' }}
-          PING_MODEL: ${{ vars.PING_MODEL || 'haiku' }}
+          PING_PROMPT: "${{ vars.PING_PROMPT || 'Reply with only the single word ready' }}"
+          PING_MODEL: "${{ vars.PING_MODEL || 'haiku' }}"
         run: |
           set -euo pipefail
           if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then

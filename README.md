@@ -10,50 +10,54 @@ It runs as a **GitHub Action**, so:
 
 - ✅ It fires **even when your laptop is closed or off** (it's on GitHub's servers, not yours).
 - ✅ It's **free** on public repos (unlimited Actions minutes).
-- ✅ Anyone can use it by **forking + adding one secret**.
+- ✅ Setup is **one command and two browser approvals**.
 
 > **This uses your subscription, not the API.** The ping runs Claude Code in headless mode authenticated with a Pro/Max token, so it counts against your *real* account window. The Anthropic API is pay-per-token and has no 5-hour window — pinging it would do nothing for this. You need a **Claude Pro or Max** plan.
 
 ---
 
-## Install — the one-liner (≈2 min)
+## Install — one command (≈2 min)
 
-Needs the [GitHub CLI](https://cli.github.com) (`brew install gh`) and [Node.js](https://nodejs.org). It's safe to pipe into bash — every prompt reads from your terminal.
+The only prerequisite is the [GitHub CLI](https://cli.github.com) (`brew install gh`) and a **Claude Pro/Max** plan.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/install.sh | bash
 ```
 
-The installer creates your own copy from the template, logs you into GitHub, generates a Claude token, stores it as a secret, asks for your timezone + hour, and fires a test run. Done.
+You approve **two browser logins** — GitHub, then Claude — and the installer does everything else, with **no prompts and no local files**:
 
-### Or, step by step with the CLI
+1. creates `your-username/claude-min-max` in your GitHub account,
+2. mints your Claude subscription token (captured automatically) and stores it as an encrypted repo secret,
+3. auto-detects your timezone and schedules the daily **8am** ping,
+4. fires a test run so you can see it work.
+
+**Re-running it is safe** — it updates your existing setup instead of starting over:
 
 ```bash
-gh repo create my-claude-pinger --template PatrickJaiin/claude-min-max --public --clone
-cd my-claude-pinger
-./install.sh            # configures the repo you're in
+curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/install.sh | PING_HOUR=8,13 bash   # two windows: 8am–6pm coverage
+curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/install.sh | ROTATE=1 bash        # mint a fresh token
 ```
 
-## Install — no scripts (UI only)
+Other overrides: `PING_TZ=Europe/Berlin`, `REPO_NAME=my-pinger`. Or change the schedule directly:
 
-No `gh` needed; you only run Claude Code locally to mint the token.
+```bash
+gh variable set PING_HOUR --repo your-username/claude-min-max --body "8,13"
+```
+
+## Install — no terminal (web UI only)
+
+You only need Claude Code locally to mint the token.
 
 1. Click **“Use this template” → Create a new repository** (keep it **public** for free Actions minutes).
-2. **Generate a token** on your machine:
-   ```bash
-   npm install -g @anthropic-ai/claude-code
-   claude setup-token          # log in with Pro/Max, copy the sk-ant-oat… token
-   ```
-3. **Add the secret:** your repo → **Settings → Secrets and variables → Actions → New repository secret**
-   - Name: `CLAUDE_CODE_OAUTH_TOKEN`
-   - Value: the token you copied
-4. **Set your schedule** (same page, **Variables** tab → New repository variable):
+2. On your machine, run `claude setup-token`, log in with Pro/Max, and copy the `sk-ant-oat…` token.
+3. In your new repo: **Settings → Secrets and variables → Actions → New repository secret** — name `CLAUDE_CODE_OAUTH_TOKEN`, value the token.
+4. Same page, **Variables** tab — set at least `PING_TZ` (defaults are 8:00 UTC otherwise):
 
    | Variable      | Example         | Default        | Meaning |
    |---------------|-----------------|----------------|---------|
-   | `PING_TZ`     | `Asia/Kolkata`  | `Asia/Kolkata` | Your [IANA timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) |
+   | `PING_TZ`     | `Asia/Kolkata`  | `UTC`          | Your [IANA timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) |
    | `PING_HOUR`   | `8` or `8,13,18`| `8`            | Hour(s) to ping, 24h clock, comma-separated |
-   | `PING_PROMPT` | `say hi`        | `Reply with only the single word: ready` | What to send |
+   | `PING_PROMPT` | `say hi`        | `Reply with only the single word ready` | What to send |
    | `PING_MODEL`  | `haiku`         | `haiku`        | Model for the ping (haiku = smallest footprint) |
 
 5. **Test:** Actions tab → *Morning Claude Ping* → **Run workflow**.
@@ -69,7 +73,7 @@ GitHub cron (every 30 min, UTC)
   Gate step ── is it PING_HOUR in PING_TZ right now? ── no ──▶ exit (a few seconds)
         │ yes
         ▼
-  Install Claude Code  →  claude -p "…" with your subscription token
+  Install Claude Code (native installer)  →  claude -p "…" with your subscription token
         │
         ▼
   Your account's 5-hour window starts. ✓
@@ -86,7 +90,8 @@ The ping itself is a single Haiku turn (a few tokens) — a negligible slice of 
 - **Timing is approximate.** GitHub's scheduled workflows are best-effort and can be delayed several minutes (occasionally longer) during peak load. Fine for "start my window around 8am"; not a second-accurate alarm.
 - **Keep the repo active.** GitHub **disables scheduled workflows after 60 days with no commits.** A push every couple of months (or any commit) keeps it alive.
 - **Public vs private.** Public repos get unlimited Actions minutes — recommended. On a **private** repo the 30-min cron uses ~48 short runs/day against your free minutes; if you care, switch to a single precise daily run (see below).
-- **Your token is a credential.** It lives only in *your* repo's encrypted secrets and authenticates as your Claude account. Don't paste it anywhere else. Revoke/rotate any time with `claude setup-token`.
+- **Your token is a credential.** It lives only in *your* repo's encrypted secrets and authenticates as your Claude account. Don't paste it anywhere else. Rotate it any time by re-running the installer with `ROTATE=1`.
+- **No third-party actions.** The workflow uses zero marketplace actions — just GitHub's runner and the official Claude Code installer. Less supply chain to trust.
 - **It's just normal usage.** A small scheduled message is ordinary product use — nothing exotic.
 
 ### Want one precise run/day instead of the 30-min gate? (good for private repos)

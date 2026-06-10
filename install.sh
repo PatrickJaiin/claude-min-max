@@ -145,7 +145,13 @@ EOF
     while [ -z "$token" ] && [ "$tries" -lt 3 ]; do
       tries=$((tries + 1))
       printf 'Paste the sk-ant-oat… token (input hidden): ' >"$TTY"
-      read -rs cand <"$TTY"; printf '\n' >"$TTY"
+      # Terminal copies often hard-wrap the token across lines (Claude Code's
+      # TUI does). read stops at the first newline, so slurp the whole paste:
+      # keep reading while more input arrives within a second, then strip all
+      # whitespace. Wrapped, spaced, or multi-line pastes all come out clean.
+      IFS= read -rs cand <"$TTY"
+      while IFS= read -rs -t 1 extra <"$TTY"; do cand="$cand$extra"; done
+      printf '\n' >"$TTY"
       cand=$(printf '%s' "$cand" | tr -d '[:space:]')
       if valid_token "$cand"; then
         token="$cand"; ok "Token verified"

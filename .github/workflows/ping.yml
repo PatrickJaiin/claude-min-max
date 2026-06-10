@@ -28,8 +28,8 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     env:
-      PING_TZ: ${{ vars.PING_TZ || 'UTC' }}
-      PING_HOUR: ${{ vars.PING_HOUR || '8' }}
+      PING_TZ: ${{ vars.PING_TZ || 'Asia/Kolkata' }}
+      PING_HOUR: ${{ vars.PING_HOUR || '9:30' }}
     steps:
       - name: Is it ping time in your timezone?
         id: gate
@@ -48,16 +48,22 @@ jobs:
           printf 'Local time in %s: %s:%02d  (target hour[s]: %s)\n' \
             "$PING_TZ" "$now_h" "$now_m" "$PING_HOUR"
 
-          # Match if the current local hour is one of PING_HOUR (comma-separated)
-          # AND we're in the first half of the hour. The */30 schedule guarantees
-          # a firing lands in that window for both whole- and half-hour timezones.
+          # Match when the current local time falls in the same half-hour window
+          # as one of the PING_HOUR targets. Targets are "H" (top of the hour)
+          # or "H:30" (half past), comma-separated. The */30 cron guarantees one
+          # firing lands in every half-hour window, whatever the timezone offset.
           go=false
           IFS=',' read -ra targets <<< "$PING_HOUR"
-          for h in "${targets[@]}"; do
-            h=$(echo "$h" | tr -cd '0-9')   # keep digits only ("08", " 8 " both fine)
-            [ -n "$h" ] || continue
-            if [ "$((10#$now_h))" -eq "$((10#$h))" ] && [ "$now_m" -lt 30 ]; then
-              go=true
+          for t in "${targets[@]}"; do
+            t=$(echo "$t" | tr -cd '0-9:')   # "08", " 8 ", "9:30" all fine
+            th=${t%%:*}
+            tm=${t#*:}; [ "$tm" = "$t" ] && tm=0
+            th=$(echo "$th" | tr -cd '0-9'); tm=$(echo "$tm" | tr -cd '0-9')
+            [ -n "$th" ] || continue
+            [ -n "$tm" ] || tm=0
+            if [ "$((10#$now_h))" -eq "$((10#$th))" ]; then
+              if [ "$((10#$tm))" -lt 30 ] && [ "$now_m" -lt 30 ]; then go=true; fi
+              if [ "$((10#$tm))" -ge 30 ] && [ "$now_m" -ge 30 ]; then go=true; fi
             fi
           done
 

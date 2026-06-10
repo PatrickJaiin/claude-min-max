@@ -11,8 +11,8 @@
 #   4. fires a test run
 #
 # Re-running is safe — it updates your existing setup. Optional overrides:
-#   curl -fsSL …/install.sh | PING_HOUR=8,13 bash      # change ping hour(s)
-#   curl -fsSL …/install.sh | ROTATE=1 bash            # mint a fresh token
+#   curl -fsSL …/install.sh | PING_HOUR=9:30,14:30 bash   # change ping time(s)
+#   curl -fsSL …/install.sh | ROTATE=1 bash               # mint a fresh token
 #   PING_TZ=Europe/Berlin, REPO_NAME=my-pinger, TEMPLATE=owner/repo also work.
 #
 # Safe to pipe into bash: anything interactive reads from /dev/tty, not stdin.
@@ -21,7 +21,7 @@ set -euo pipefail
 
 TEMPLATE="${TEMPLATE:-PatrickJaiin/claude-min-max}"
 REPO_NAME="${REPO_NAME:-claude-min-max}"
-PING_HOUR="${PING_HOUR:-8}"
+PING_HOUR="${PING_HOUR:-9:30}"
 
 TTY=/dev/tty
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -176,7 +176,9 @@ fi
 [ -n "$tz" ] || tz=$(ask "Couldn't detect your timezone — enter it (e.g. Asia/Kolkata) [UTC]: " "UTC")
 gh variable set PING_TZ   --repo "$repo" --body "$tz"
 gh variable set PING_HOUR --repo "$repo" --body "$PING_HOUR"
-ok "Daily ping at ${PING_HOUR}:00 ($tz)"
+# Display "9:30" as-is, bare hours as "8:00"
+ping_disp=$(printf '%s' "$PING_HOUR" | awk -F, '{for(i=1;i<=NF;i++){h=$i; gsub(/[[:space:]]/,"",h); printf "%s%s",(h~/:/?h:h":00"),(i<NF?", ":"")}}')
+ok "Daily ping at $ping_disp ($tz)"
 
 # ── 5. Fire a test run and wait for the verdict ─────────────────────────────
 # (retries briefly: template copies are async)
@@ -201,5 +203,5 @@ else
 fi
 
 echo
-ok "Done. Claude pings at ${PING_HOUR}:00 ($tz) every day — laptop open or not."
-printf '  Change the schedule anytime:  gh variable set PING_HOUR --repo %s --body "8,13"\n' "$repo"
+ok "Done. Claude pings at $ping_disp ($tz) every day — laptop open or not."
+printf '  Change the time anytime:  gh variable set PING_HOUR --repo %s --body "9:30,14:30"\n' "$repo"

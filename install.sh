@@ -7,7 +7,8 @@
 # What it does, with no local files left behind:
 #   1. creates <you>/claude-min-max in your GitHub account (from the template)
 #   2. mints your Claude subscription token and stores it as an encrypted secret
-#   3. detects your timezone, schedules the daily ping (8am by default)
+#   3. detects your timezone and commits exact cron times for your daily ping
+#      (9:30am by default)
 #   4. fires a test run
 #
 # Re-running is safe — it updates your existing setup. Optional overrides:
@@ -21,7 +22,7 @@ set -euo pipefail
 
 TEMPLATE="${TEMPLATE:-PatrickJaiin/claude-min-max}"
 REPO_NAME="${REPO_NAME:-claude-min-max}"
-PING_HOUR="${PING_HOUR:-9:30}"
+# PING_HOUR/PING_TZ are resolved later: env override → repo variable → default
 
 TTY=/dev/tty
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -165,8 +166,13 @@ EOF
   ok "Token stored as encrypted secret in $repo"
 fi
 
-# ── 4. Schedule: your timezone (auto-detected) + ping hour(s) ───────────────
+# ── 4. Schedule: exact UTC cron times, committed into the workflow ──────────
+# GitHub fires high-frequency crons too unreliably to poll-and-gate (measured:
+# ~85% of */30 firings dropped), so we compute the exact UTC firing times for
+# your local ping time(s) — plus a 20-minute retry each — and commit them into
+# ping.yml. The workflow dedupes so only one firing actually pings.
 tz="${PING_TZ:-}"
+[ -n "$tz" ] || tz=$(gh variable get PING_TZ --repo "$repo" --json value -q .value 2>/dev/null || true)
 if [ -z "$tz" ] && [ -L /etc/localtime ]; then
   tz=$(readlink /etc/localtime | sed -E 's|.*/zoneinfo/||')
 fi
@@ -174,11 +180,56 @@ if [ -z "$tz" ] && command -v timedatectl >/dev/null 2>&1; then
   tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
 fi
 [ -n "$tz" ] || tz=$(ask "Couldn't detect your timezone — enter it (e.g. Asia/Kolkata) [UTC]: " "UTC")
+
+[ -n "${PING_HOUR:-}" ] || PING_HOUR=$(gh variable get PING_HOUR --repo "$repo" --json value -q .value 2>/dev/null || true)
+PING_HOUR="${PING_HOUR:-9:30}"
+
+# Recorded for display and for future installer re-runs; the workflow itself
+# runs off the committed cron lines, not these variables.
 gh variable set PING_TZ   --repo "$repo" --body "$tz"
 gh variable set PING_HOUR --repo "$repo" --body "$PING_HOUR"
+
 # Display "9:30" as-is, bare hours as "8:00"
 ping_disp=$(printf '%s' "$PING_HOUR" | awk -F, '{for(i=1;i<=NF;i++){h=$i; gsub(/[[:space:]]/,"",h); printf "%s%s",(h~/:/?h:h":00"),(i<NF?", ":"")}}')
-ok "Daily ping at $ping_disp ($tz)"
+
+# Current UTC offset of the timezone, in minutes (DST-aware as of today —
+# re-run the installer after a DST change to shift the crons).
+offset=$(TZ="$tz" date +%z)   # e.g. +0530
+omin=$((10#${offset:1:2} * 60 + 10#${offset:3:2}))
+[ "${offset:0:1}" = "-" ] && omin=$((-omin))
+
+cron_lines=""
+IFS=',' read -ra targets <<< "$PING_HOUR"
+for t in "${targets[@]}"; do
+  t=$(printf '%s' "$t" | tr -cd '0-9:')
+  th=${t%%:*}; tm=${t#*:}; [ "$tm" = "$t" ] && tm=0
+  [ -n "$th" ] || continue
+  tm=${tm:-0}
+  utc=$(( (10#$th * 60 + 10#$tm - omin + 1440) % 1440 ))
+  retry=$(( (utc + 20) % 1440 ))
+  cron_lines+=$(printf '    - cron: "%d %d * * *"   # %02d:%02d %s' "$((utc % 60))" "$((utc / 60))" "$((10#$th))" "$((10#$tm))" "$tz")$'\n'
+  cron_lines+=$(printf '    - cron: "%d %d * * *"   # retry' "$((retry % 60))" "$((retry / 60))")$'\n'
+done
+[ -n "$cron_lines" ] || { err "No valid times in PING_HOUR='$PING_HOUR' (use H or H:30, comma-separated)."; exit 1; }
+
+wf_path="repos/$repo/contents/.github/workflows/ping.yml"
+wf_cur=$(gh api "$wf_path" -H "Accept: application/vnd.github.raw+json")
+# newline-safe replacement via ENVIRON (BSD awk rejects newlines in -v values)
+wf_new=$(printf '%s\n' "$wf_cur" | REPL="$cron_lines" awk '
+  /# CRON-BEGIN/ { print; printf "%s", ENVIRON["REPL"]; skip=1; next }
+  /# CRON-END/   { skip=0 }
+  !skip { print }
+')
+if [ "$wf_new" = "$wf_cur" ]; then
+  ok "Ping schedule already set: $ping_disp ($tz)"
+else
+  wf_sha=$(gh api "$wf_path" --jq .sha)
+  b64=$(printf '%s\n' "$wf_new" | base64 | tr -d '\n')
+  gh api -X PUT "$wf_path" -f message="Set ping schedule: $ping_disp ($tz)" \
+    -f content="$b64" -f sha="$wf_sha" >/dev/null
+  ok "Committed ping schedule: $ping_disp ($tz)"
+  [ -f ".github/workflows/ping.yml" ] && printf '  (local clone is now behind — git pull to sync)\n'
+fi
 
 # ── 5. Fire a test run and wait for the verdict ─────────────────────────────
 # (retries briefly: template copies are async)
@@ -204,4 +255,5 @@ fi
 
 echo
 ok "Done. Claude pings at $ping_disp ($tz) every day — laptop open or not."
-printf '  Change the time anytime:  gh variable set PING_HOUR --repo %s --body "9:30,14:30"\n' "$repo"
+printf '  Change the time anytime by re-running the installer, e.g.:\n'
+printf '    curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | PING_HOUR=9:30,14:30 bash\n' "$TEMPLATE"

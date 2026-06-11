@@ -28,7 +28,7 @@ You approve **two browser logins** — GitHub, then Claude — and the installer
 
 1. creates `your-username/claude-min-max` in your GitHub account,
 2. mints your Claude subscription token, **verifies it authenticates**, and stores it as an encrypted repo secret,
-3. auto-detects your timezone and schedules the daily **9:30am** ping,
+3. auto-detects your timezone, computes the exact UTC cron times for your daily **9:30am** ping, and commits them to the workflow,
 4. fires a test run so you can see it work.
 
 **Re-running it is safe** — it updates your existing setup instead of starting over. `ROTATE=1` forces a fresh token, `PING_TZ`/`REPO_NAME` override the detected timezone / repo name:
@@ -39,30 +39,24 @@ curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/in
 
 ## Changing the ping time
 
-The ping time lives in one repo variable, **`PING_HOUR`** — change it any time, no re-install, no commit. It takes effect at the next half-hour check.
-
-**Format:** 24-hour clock, whole or half hours only (`H` or `H:30`), comma-separated for multiple pings a day. Times are in your `PING_TZ` timezone.
-
-| You want | Set `PING_HOUR` to |
-|---|---|
-| 9:30am (default) | `9:30` |
-| 8am sharp | `8` |
-| 9:30am + 2:30pm (back-to-back windows, 9:30am–7:30pm) | `9:30,14:30` |
-| morning, afternoon, evening | `8,13,18` |
-
-Pick whichever way is convenient:
+Re-run the installer with the time(s) you want — it recomputes the UTC crons and commits them for you:
 
 ```bash
-# 1. One command with the GitHub CLI:
-gh variable set PING_HOUR --repo your-username/claude-min-max --body "9:30,14:30"
-
-# 2. Or re-run the installer with the override:
 curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/install.sh | PING_HOUR=9:30,14:30 bash
 ```
 
-**3. Or in the browser:** your repo → **Settings → Secrets and variables → Actions → Variables** → edit `PING_HOUR`.
+**Format:** 24-hour clock, any minute (`H` or `H:MM`), comma-separated for multiple pings a day. Times are in your local timezone (auto-detected; override with `PING_TZ=…`). Keep times at least 40 minutes apart — closer ones get swallowed by the retry-dedupe window.
 
-To change the **timezone** instead, set `PING_TZ` the same way (any [IANA name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), e.g. `Europe/Berlin`).
+| You want | Run with |
+|---|---|
+| 9:30am (default) | `PING_HOUR=9:30` |
+| 8am sharp | `PING_HOUR=8` |
+| 9:30am + 2:30pm (back-to-back windows, 9:30am–7:30pm) | `PING_HOUR=9:30,14:30` |
+| morning, afternoon, evening | `PING_HOUR=8,13,18` |
+
+**No terminal?** Edit the workflow in the browser instead: your repo → `.github/workflows/ping.yml` → ✏️ → change the `- cron:` lines between the `CRON-BEGIN`/`CRON-END` markers. Cron times are **UTC**, so subtract your UTC offset (9:30am IST − 5:30 = `"0 4 * * *"`); keep the second line 20 minutes later as the retry.
+
+> Note: the `PING_TZ`/`PING_HOUR` repo *variables* are inputs the installer reads — editing them alone doesn't change the schedule; the committed cron lines are what GitHub runs.
 
 ## Install — no terminal (web UI only)
 
@@ -71,35 +65,34 @@ You only need Claude Code locally to mint the token.
 1. Click **“Use this template” → Create a new repository** (keep it **public** for free Actions minutes).
 2. On your machine, run `claude setup-token`, log in with Pro/Max, and copy the `sk-ant-oat…` token.
 3. In your new repo: **Settings → Secrets and variables → Actions → New repository secret** — name `CLAUDE_CODE_OAUTH_TOKEN`, value the token.
-4. Same page, **Variables** tab — set `PING_TZ` and `PING_HOUR` (defaults: 9:30am Asia/Kolkata):
+4. The default schedule is **9:30am IST**. For a different time, edit `.github/workflows/ping.yml` in the browser — see [Changing the ping time](#changing-the-ping-time).
+5. Optional tweaks, under **Settings → Secrets and variables → Actions → Variables**:
 
-   | Variable      | Example              | Default        | Meaning |
-   |---------------|----------------------|----------------|---------|
-   | `PING_TZ`     | `Europe/Berlin`      | `Asia/Kolkata` | Your [IANA timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) |
-   | `PING_HOUR`   | `9:30` or `8,14:30`  | `9:30`         | Time(s) to ping — `H` or `H:30`, 24h clock, comma-separated |
-   | `PING_PROMPT` | `say hi`             | `Reply with only the single word ready` | What to send |
-   | `PING_MODEL`  | `haiku`              | `haiku`        | Model for the ping (haiku = smallest footprint) |
+   | Variable      | Example  | Default        | Meaning |
+   |---------------|----------|----------------|---------|
+   | `PING_PROMPT` | `say hi` | `Reply with only the single word ready` | What to send |
+   | `PING_MODEL`  | `haiku`  | `haiku`        | Model for the ping (haiku = smallest footprint) |
 
-5. **Test:** Actions tab → *Morning Claude Ping* → **Run workflow**.
+6. **Test:** Actions tab → *Morning Claude Ping* → **Run workflow**.
 
 ---
 
 ## How it works
 
 ```
-GitHub cron (every 30 min, UTC)
+GitHub cron at your exact ping time (UTC), ×2 — primary + a retry 20 min later
         │
         ▼
-  Gate step ── is it PING_HOUR in PING_TZ right now? ── no ──▶ exit (a few seconds)
-        │ yes
+  Dedupe ── did a sibling run already ping in the last 40 min? ── yes ──▶ exit
+        │ no
         ▼
   Install Claude Code (native installer)  →  claude -p "…" with your subscription token
         │
         ▼
-  Your account's 5-hour window starts. ✓
+  Your account's 5-hour window starts. ✓   (old no-op runs are auto-deleted)
 ```
 
-The cron fires every 30 minutes, but the gate exits immediately unless the current half-hour matches one of your `PING_HOUR` times in your timezone. Resolving the timezone live means **DST and half-hour offsets (India, etc.) just work** — no UTC math, no twice-a-year edits.
+GitHub's scheduled workflows are best-effort — firings can be delayed or occasionally dropped (high-frequency crons especially: an earlier version of this project polled every 30 minutes and **~85% of firings were silently dropped**). So the installer commits your exact UTC firing time plus a retry 20 minutes later; the dedupe step guarantees at most one real ping per slot, and a cleanup step deletes old no-op runs so the Actions tab only shows actual pings.
 
 The ping itself is a single Haiku turn (a few tokens) — a negligible slice of your window's budget.
 
@@ -107,27 +100,13 @@ The ping itself is a single Haiku turn (a few tokens) — a negligible slice of 
 
 ## Notes & caveats
 
-- **Timing is approximate.** GitHub's scheduled workflows are best-effort and can be delayed several minutes (occasionally longer) during peak load. Fine for "start my window around 8am"; not a second-accurate alarm.
-- **Keep the repo active.** GitHub **disables scheduled workflows after 60 days with no commits.** A push every couple of months (or any commit) keeps it alive.
-- **Public vs private.** Public repos get unlimited Actions minutes — recommended. On a **private** repo the 30-min cron uses ~48 short runs/day against your free minutes; if you care, switch to a single precise daily run (see below).
+- **Timing is approximate.** GitHub's scheduled workflows are best-effort and can be delayed several minutes (occasionally longer) during peak load. The built-in retry covers dropped firings; still, treat it as "start my window around 9:30", not a second-accurate alarm.
+- **DST: re-run the installer after clock changes.** Cron times are fixed in UTC, computed from your timezone's offset *on install day*. If your timezone observes DST, your ping drifts by an hour when the clocks change — one installer re-run fixes it. (India has no DST: set-and-forget.)
+- **Keep the repo active.** GitHub **disables scheduled workflows after 60 days with no commits.** Any commit resets the timer — re-running the installer with a schedule change counts.
+- **Public vs private.** Public repos get unlimited Actions minutes — recommended. Even on a private repo, 2–4 one-minute runs/day is well within the free tier.
 - **Your token is a credential.** It lives only in *your* repo's encrypted secrets and authenticates as your Claude account. Don't paste it anywhere else. Rotate it any time by re-running the installer with `ROTATE=1`.
 - **No third-party actions.** The workflow uses zero marketplace actions — just GitHub's runner and the official Claude Code installer. Less supply chain to trust.
 - **It's just normal usage.** A small scheduled message is ordinary product use — nothing exotic.
-
-### Want one precise run/day instead of the 30-min gate? (good for private repos)
-
-Replace the `schedule:` block in `.github/workflows/ping.yml` with a single UTC time and drop the gate. For **9:30am IST (UTC+5:30)** that's **4:00 UTC**:
-
-```yaml
-on:
-  schedule:
-    - cron: "0 4 * * *"   # 09:30 Asia/Kolkata — adjust for your timezone
-  workflow_dispatch: {}
-```
-
-Trade-off: you compute UTC yourself and re-edit when *your* timezone changes for DST (India doesn't observe DST, so this is set-and-forget there).
-
----
 
 ## Alternatives for laptop-only setups
 

@@ -45,7 +45,7 @@ Re-run the installer with the time(s) you want — it recomputes the UTC crons a
 curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/install.sh | PING_HOUR=9:30,14:30 bash
 ```
 
-**Format:** 24-hour clock, any minute (`H` or `H:MM`), comma-separated for multiple pings a day. Times are in your local timezone (auto-detected; override with `PING_TZ=…`). Keep times at least 40 minutes apart — closer ones get swallowed by the retry-dedupe window.
+**Format:** 24-hour clock, any minute (`H` or `H:MM`), comma-separated for multiple pings a day. Times are in your local timezone (auto-detected; override with `PING_TZ=…`). Space multiple times at least 2 hours apart — closer ones get swallowed by the retry-dedupe window (and back-to-back 5-hour windows don't need closer spacing anyway).
 
 | You want | Run with |
 |---|---|
@@ -54,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/PatrickJaiin/claude-min-max/main/in
 | 9:30am + 2:30pm (back-to-back windows, 9:30am–7:30pm) | `PING_HOUR=9:30,14:30` |
 | morning, afternoon, evening | `PING_HOUR=8,13,18` |
 
-**No terminal?** Edit the workflow in the browser instead: your repo → `.github/workflows/ping.yml` → ✏️ → change the `- cron:` lines between the `CRON-BEGIN`/`CRON-END` markers. Cron times are **UTC**, so subtract your UTC offset (9:30am IST − 5:30 = `"0 4 * * *"`); keep the second line 20 minutes later as the retry.
+**No terminal?** Edit the workflow in the browser instead: your repo → `.github/workflows/ping.yml` → ✏️ → change the `- cron:` lines between the `CRON-BEGIN`/`CRON-END` markers. Cron times are **UTC**, so subtract your UTC offset; mimic the existing pattern (first firing ~7 min before your target, two retries +13 and +47 min after, all at odd minutes — round hours queue for ages on GitHub). If a `PING_UTC_MINS` repo variable exists (the installer sets it), update it too: your target time as minutes after UTC midnight (9:30 IST → 4:00 UTC → `240`) — or delete the variable to disable the late guard.
 
 > Note: the `PING_TZ`/`PING_HOUR` repo *variables* are inputs the installer reads — editing them alone doesn't change the schedule; the committed cron lines are what GitHub runs.
 
@@ -80,19 +80,19 @@ You only need Claude Code locally to mint the token.
 ## How it works
 
 ```
-GitHub cron at your exact ping time (UTC), ×2 — primary + a retry 20 min later
+GitHub cron ×3 per ping time — ~7 min early + two retries, all at odd minutes
         │
         ▼
-  Dedupe ── did a sibling run already ping in the last 40 min? ── yes ──▶ exit
+  Gate ── more than 90 min late, or a sibling already pinged? ── yes ──▶ exit
         │ no
         ▼
   Install Claude Code (native installer)  →  claude -p "…" with your subscription token
         │
         ▼
-  Your account's 5-hour window starts. ✓   (old no-op runs are auto-deleted)
+  Your account's 5-hour window starts. ✓   (no-op retry runs are auto-deleted)
 ```
 
-GitHub's scheduled workflows are best-effort — firings can be delayed or occasionally dropped (high-frequency crons especially: an earlier version of this project polled every 30 minutes and **~85% of firings were silently dropped**). So the installer commits your exact UTC firing time plus a retry 20 minutes later; the dedupe step guarantees at most one real ping per slot, and a cleanup step deletes old no-op runs so the Actions tab only shows actual pings.
+GitHub's scheduled workflows are best-effort, and **popular cron slots get severely delayed** — round hours like `0 4 * * *` can queue for hours, and an earlier version of this project that polled every 30 minutes saw ~85% of firings silently dropped. So the installer schedules three firings per ping time at unpopular odd minutes, the first ~7 minutes *before* your target so the ping lands by your chosen time. The gate ensures at most one real ping (retries skip), skips any firing delayed more than 90 minutes (a 1pm "morning ping" is worse than none), and a cleanup step deletes no-op runs so the Actions tab only shows actual pings.
 
 The ping itself is a single Haiku turn (a few tokens) — a negligible slice of your window's budget.
 

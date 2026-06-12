@@ -198,7 +198,11 @@ offset=$(TZ="$tz" date +%z)   # e.g. +0530
 omin=$((10#${offset:1:2} * 60 + 10#${offset:3:2}))
 [ "${offset:0:1}" = "-" ] && omin=$((-omin))
 
+# Per target: primary firing ~7 min EARLY plus two retries, all at "unpopular"
+# odd minutes — round-hour crons are stampeded on GitHub and can queue for
+# hours. The workflow's gate dedupes and skips firings delayed past the target.
 cron_lines=""
+utc_mins=""
 IFS=',' read -ra targets <<< "$PING_HOUR"
 for t in "${targets[@]}"; do
   t=$(printf '%s' "$t" | tr -cd '0-9:')
@@ -206,11 +210,19 @@ for t in "${targets[@]}"; do
   [ -n "$th" ] || continue
   tm=${tm:-0}
   utc=$(( (10#$th * 60 + 10#$tm - omin + 1440) % 1440 ))
-  retry=$(( (utc + 20) % 1440 ))
-  cron_lines+=$(printf '    - cron: "%d %d * * *"   # %02d:%02d %s' "$((utc % 60))" "$((utc / 60))" "$((10#$th))" "$((10#$tm))" "$tz")$'\n'
-  cron_lines+=$(printf '    - cron: "%d %d * * *"   # retry' "$((retry % 60))" "$((retry / 60))")$'\n'
+  c1=$(( (utc - 7 + 1440) % 1440 ))
+  c2=$(( (utc + 13) % 1440 ))
+  c3=$(( (utc + 47) % 1440 ))
+  cron_lines+=$(printf '    - cron: "%d %d * * *"   # %02d:%02d %s (fires ~7 min early)' \
+    "$((c1 % 60))" "$((c1 / 60))" "$((10#$th))" "$((10#$tm))" "$tz")$'\n'
+  cron_lines+=$(printf '    - cron: "%d %d * * *"   # retry' "$((c2 % 60))" "$((c2 / 60))")$'\n'
+  cron_lines+=$(printf '    - cron: "%d %d * * *"   # retry' "$((c3 % 60))" "$((c3 / 60))")$'\n'
+  utc_mins+="${utc_mins:+,}$utc"
 done
-[ -n "$cron_lines" ] || { err "No valid times in PING_HOUR='$PING_HOUR' (use H or H:30, comma-separated)."; exit 1; }
+[ -n "$cron_lines" ] || { err "No valid times in PING_HOUR='$PING_HOUR' (use H or H:MM, comma-separated)."; exit 1; }
+
+# The workflow's late guard compares run time against these targets.
+gh variable set PING_UTC_MINS --repo "$repo" --body "$utc_mins"
 
 wf_path="repos/$repo/contents/.github/workflows/ping.yml"
 wf_cur=$(gh api "$wf_path" -H "Accept: application/vnd.github.raw+json")
